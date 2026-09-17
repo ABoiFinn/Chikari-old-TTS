@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Chikari Local Reader",
+  "version": "1.0",
+  "description": "Read chikari.moe chapters aloud using a locally-run Kokoro TTS server you control.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://chikari.moe/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chikari.moe/novels/*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
