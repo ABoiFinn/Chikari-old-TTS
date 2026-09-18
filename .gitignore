@@ -14,4 +14,7 @@ release/config.json
 samples/
 __pycache__/
 *.pyc
-server_*.log
+*.log
+
+# Personal dev convenience, not for the distributed package
+release/Start Server (Dev).bat

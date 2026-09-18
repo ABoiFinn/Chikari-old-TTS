@@ -8,13 +8,45 @@
   const SERVER = "http://127.0.0.1:8791";
   const DEFAULT_SETTINGS = { engine: "kokoro", voice: "am_michael", speed: 1.0, autoAdvance: true, preloadNext: true };
 
-  const VOICES = [
-    { id: "am_michael", label: "Michael" },
-    { id: "am_puck", label: "Puck" },
-    { id: "af_bella", label: "Bella" },
-    { id: "af_nova", label: "Nova" },
-    { id: "bm_george", label: "George" },
-    { id: "bf_emma", label: "Emma" },
+  const VOICE_GROUPS = [
+    {
+      label: "English (US)",
+      voices: [
+        { id: "af_alloy", label: "Alloy" },
+        { id: "af_aoede", label: "Aoede" },
+        { id: "af_bella", label: "Bella" },
+        { id: "af_heart", label: "Heart" },
+        { id: "af_jessica", label: "Jessica" },
+        { id: "af_kore", label: "Kore" },
+        { id: "af_nicole", label: "Nicole" },
+        { id: "af_nova", label: "Nova" },
+        { id: "af_river", label: "River" },
+        { id: "af_sarah", label: "Sarah" },
+        { id: "af_sky", label: "Sky" },
+        { id: "am_adam", label: "Adam" },
+        { id: "am_echo", label: "Echo" },
+        { id: "am_eric", label: "Eric" },
+        { id: "am_fenrir", label: "Fenrir" },
+        { id: "am_liam", label: "Liam" },
+        { id: "am_michael", label: "Michael" },
+        { id: "am_onyx", label: "Onyx" },
+        { id: "am_puck", label: "Puck" },
+        { id: "am_santa", label: "Santa" },
+      ],
+    },
+    {
+      label: "English (UK)",
+      voices: [
+        { id: "bf_alice", label: "Alice" },
+        { id: "bf_emma", label: "Emma" },
+        { id: "bf_isabella", label: "Isabella" },
+        { id: "bf_lily", label: "Lily" },
+        { id: "bm_daniel", label: "Daniel" },
+        { id: "bm_fable", label: "Fable" },
+        { id: "bm_george", label: "George" },
+        { id: "bm_lewis", label: "Lewis" },
+      ],
+    },
   ];
   const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 
@@ -85,11 +117,11 @@
     return new Blob([bytes], { type: mime });
   }
 
-  function startSynthesisJob(text) {
+  function startSynthesisJob(text, background = false) {
     return proxyFetch({
       method: "POST",
       url: `${SERVER}/speak/start`,
-      body: { text, engine: settings.engine, voice: settings.voice, speed: settings.speed },
+      body: { text, engine: settings.engine, voice: settings.voice, speed: settings.speed, background },
     }).then((resp) => JSON.parse(resp.text));
   }
 
@@ -107,12 +139,26 @@
     return base64ToBlob(audioResp.base64, "audio/wav");
   }
 
-  async function synthesize(text, onProgress) {
+  async function synthesize(text, onProgress, path) {
     const { job_id } = await startSynthesisJob(text);
     currentJobId = job_id;
+    if (path) saveCurrentJob(path, job_id);
     const blob = await waitForJobAudio(job_id, onProgress);
     currentJobId = null;
     return blob;
+  }
+
+  // Wraps waitForJobAudio so a stale reference (server restarted, job was
+  // pruned, or it got cancelled/errored before finishing) is treated as a
+  // cache miss instead of a hard failure -- the caller just falls through to
+  // synthesizing fresh.
+  async function tryReuseJob(jobId, onProgress) {
+    try {
+      return await waitForJobAudio(jobId, onProgress);
+    } catch (err) {
+      console.warn("Local Reader: cached job no longer usable, resynthesizing", err);
+      return null;
+    }
   }
 
   // Fire-and-forget: tell the server to stop a job we no longer care about.
@@ -163,6 +209,49 @@
     });
   }
 
+  // Remembers the synthesis job for whatever chapter this page is currently
+  // on, so reloading the same chapter can reuse it instead of resynthesizing
+  // from scratch -- as long as the server process is still the same one and
+  // hasn't pruned or cancelled it (see tryReuseJob).
+  function saveCurrentJob(path, jobId) {
+    chrome.storage.local.set({
+      lr_current_job: { path, jobId, voice: settings.voice, speed: settings.speed, engine: settings.engine },
+    });
+  }
+
+  function getMatchingCurrentJob(path) {
+    return new Promise((resolve) => {
+      chrome.storage.local.get({ lr_current_job: null }, (items) => {
+        const j = items.lr_current_job;
+        const matches = j && j.path === path && j.voice === settings.voice && j.speed === settings.speed && j.engine === settings.engine;
+        resolve(matches ? j.jobId : null);
+      });
+    });
+  }
+
+  // Where playback was left off in whatever chapter was last playing --
+  // a single slot, not a per-chapter history, so it only ever helps you
+  // resume the one you most recently paused/left.
+  function savePosition(path, time) {
+    chrome.storage.local.set({
+      lr_position: { path, voice: settings.voice, speed: settings.speed, time },
+    });
+  }
+
+  function getMatchingPosition(path) {
+    return new Promise((resolve) => {
+      chrome.storage.local.get({ lr_position: null }, (items) => {
+        const p = items.lr_position;
+        const matches = p && p.path === path && p.voice === settings.voice && p.speed === settings.speed;
+        resolve(matches ? p.time : 0);
+      });
+    });
+  }
+
+  function clearPosition() {
+    chrome.storage.local.remove("lr_position");
+  }
+
   async function schedulePreloadNextChapter() {
     if (!settings.preloadNext) return;
     const nextPath = adjacentChapterHref(1);
@@ -171,7 +260,7 @@
     if (!m) return;
     try {
       const text = await fetchChapterText(m[1], m[2]);
-      const { job_id } = await startSynthesisJob(text);
+      const { job_id } = await startSynthesisJob(text, true);
       chrome.storage.local.set({
         lr_preload: { path: nextPath, jobId: job_id, voice: settings.voice, speed: settings.speed, engine: settings.engine },
       });
@@ -212,6 +301,8 @@
     }
   }
 
+  let lastPositionSave = 0;
+
   function updateSeekUI() {
     if (!currentAudio || seeking) return;
     const dur = currentAudio.duration || 0;
@@ -221,6 +312,12 @@
     el("lr-fill").style.width = pct + "%";
     if (state === "playing") setStatus(`Reading · ${fmtTime(currentAudio.currentTime)} / ${fmtTime(dur)}`);
     else if (state === "paused") setStatus(`Paused · ${fmtTime(currentAudio.currentTime)} / ${fmtTime(dur)}`);
+
+    const now = Date.now();
+    if (now - lastPositionSave > 3000) {
+      lastPositionSave = now;
+      savePosition(location.pathname, currentAudio.currentTime);
+    }
   }
 
   function attachAudioHandlers(audio) {
@@ -240,6 +337,7 @@
       state = "idle";
       updatePlayButton();
       setStatus("Finished");
+      clearPosition();
       if (settings.autoAdvance) {
         const next = adjacentChapterHref(1);
         if (next) goToChapter(next);
@@ -257,23 +355,38 @@
     state = "loading";
     updatePlayButton();
     try {
+      let blob = null;
+
       const preload = await getMatchingPreload(location.pathname);
-      let blob;
       if (preload) {
         chrome.storage.local.remove("lr_preload");
         currentJobId = preload.jobId;
         setStatus("Finishing preload...");
-        blob = await waitForJobAudio(preload.jobId, setProgress);
+        blob = await tryReuseJob(preload.jobId, setProgress);
         currentJobId = null;
-      } else {
+      }
+
+      if (!blob) {
+        const cachedJobId = await getMatchingCurrentJob(location.pathname);
+        if (cachedJobId) {
+          currentJobId = cachedJobId;
+          setStatus("Resuming...");
+          blob = await tryReuseJob(cachedJobId, setProgress);
+          currentJobId = null;
+        }
+      }
+
+      if (!blob) {
         setStatus("Fetching chapter...");
         const text = await fetchChapterText(here.slug, here.number);
         setStatus("Synthesizing... 0%");
-        blob = await synthesize(text, setProgress);
+        blob = await synthesize(text, setProgress, location.pathname);
       }
 
       currentAudioUrl = URL.createObjectURL(blob);
       currentAudio = new Audio(currentAudioUrl);
+      const resumeAt = await getMatchingPosition(location.pathname);
+      if (resumeAt > 0) currentAudio.currentTime = resumeAt;
       attachAudioHandlers(currentAudio);
       currentAudio.play();
       schedulePreloadNextChapter();
@@ -322,6 +435,9 @@
       URL.revokeObjectURL(currentAudioUrl);
       currentAudioUrl = null;
     }
+    // Speed changes the audio's own timeline, so a saved position in seconds
+    // no longer points at the same spot in the chapter.
+    clearPosition();
     state = "idle";
     updatePlayButton();
     setStatus("Ready");
@@ -493,7 +609,12 @@
   }
 
   function voiceOptionsHtml() {
-    return VOICES.map((v) => `<option value="${v.id}" ${v.id === settings.voice ? "selected" : ""}>${v.label}</option>`).join("");
+    return VOICE_GROUPS.map(
+      (g) =>
+        `<optgroup label="${g.label}">` +
+        g.voices.map((v) => `<option value="${v.id}" ${v.id === settings.voice ? "selected" : ""}>${v.label}</option>`).join("") +
+        `</optgroup>`
+    ).join("");
   }
 
   function speedOptionsHtml() {

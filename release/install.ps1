@@ -36,7 +36,7 @@ if (-not (Test-Path "$root\venv")) {
 }
 
 & "$root\venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
-& "$root\venv\Scripts\python.exe" -m pip install --quiet kokoro-onnx soundfile flask requests
+& "$root\venv\Scripts\python.exe" -m pip install --quiet kokoro-onnx soundfile flask requests pystray Pillow
 Write-Host "Python packages installed."
 
 Section "Downloading the voice model (about 350 MB, one time only)"
@@ -76,8 +76,9 @@ if (-not (Test-Path "$root\config.json")) {
 
 Section "All done!"
 Write-Host "Next steps:" -ForegroundColor Green
-Write-Host "  1. Double-click 'Start Server.bat' (keep its window open while reading)."
+Write-Host "  1. Double-click 'Start Server.bat' -- look for its icon in the system tray (no window will open)."
 Write-Host "  2. Load the 'extension' folder as an unpacked Chrome extension."
 Write-Host "  3. Open a chapter on chikari.moe and click Play in the panel."
+Write-Host "  Right-click the tray icon and choose 'Close Server' when you're done reading."
 Write-Host ""
 Read-Host "Press Enter to close this window"

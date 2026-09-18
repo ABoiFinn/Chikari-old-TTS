@@ -15,13 +15,45 @@
 
   const SERVER = "http://127.0.0.1:8791";
 
-  const VOICES = [
-    { id: "am_michael", label: "Michael" },
-    { id: "am_puck", label: "Puck" },
-    { id: "af_bella", label: "Bella" },
-    { id: "af_nova", label: "Nova" },
-    { id: "bm_george", label: "George" },
-    { id: "bf_emma", label: "Emma" },
+  const VOICE_GROUPS = [
+    {
+      label: "English (US)",
+      voices: [
+        { id: "af_alloy", label: "Alloy" },
+        { id: "af_aoede", label: "Aoede" },
+        { id: "af_bella", label: "Bella" },
+        { id: "af_heart", label: "Heart" },
+        { id: "af_jessica", label: "Jessica" },
+        { id: "af_kore", label: "Kore" },
+        { id: "af_nicole", label: "Nicole" },
+        { id: "af_nova", label: "Nova" },
+        { id: "af_river", label: "River" },
+        { id: "af_sarah", label: "Sarah" },
+        { id: "af_sky", label: "Sky" },
+        { id: "am_adam", label: "Adam" },
+        { id: "am_echo", label: "Echo" },
+        { id: "am_eric", label: "Eric" },
+        { id: "am_fenrir", label: "Fenrir" },
+        { id: "am_liam", label: "Liam" },
+        { id: "am_michael", label: "Michael" },
+        { id: "am_onyx", label: "Onyx" },
+        { id: "am_puck", label: "Puck" },
+        { id: "am_santa", label: "Santa" },
+      ],
+    },
+    {
+      label: "English (UK)",
+      voices: [
+        { id: "bf_alice", label: "Alice" },
+        { id: "bf_emma", label: "Emma" },
+        { id: "bf_isabella", label: "Isabella" },
+        { id: "bf_lily", label: "Lily" },
+        { id: "bm_daniel", label: "Daniel" },
+        { id: "bm_fable", label: "Fable" },
+        { id: "bm_george", label: "George" },
+        { id: "bm_lewis", label: "Lewis" },
+      ],
+    },
   ];
   const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 
@@ -104,8 +136,8 @@
     });
   }
 
-  function startSynthesisJob(text, settings) {
-    return gmPostJson(`${SERVER}/speak/start`, { text, ...settings });
+  function startSynthesisJob(text, settings, background = false) {
+    return gmPostJson(`${SERVER}/speak/start`, { text, ...settings, background });
   }
 
   async function waitForJobAudio(jobId, onProgress) {
@@ -120,12 +152,26 @@
     return gmGet(`${SERVER}/speak/audio/${jobId}`, "blob");
   }
 
-  async function synthesize(text, settings, onProgress) {
+  async function synthesize(text, settings, onProgress, path) {
     const { job_id } = await startSynthesisJob(text, settings);
     currentJobId = job_id;
+    if (path) saveCurrentJob(path, settings, job_id);
     const blob = await waitForJobAudio(job_id, onProgress);
     currentJobId = null;
     return blob;
+  }
+
+  // Wraps waitForJobAudio so a stale reference (server restarted, job was
+  // pruned, or it got cancelled/errored before finishing) is treated as a
+  // cache miss instead of a hard failure -- the caller just falls through to
+  // synthesizing fresh.
+  async function tryReuseJob(jobId, onProgress) {
+    try {
+      return await waitForJobAudio(jobId, onProgress);
+    } catch (err) {
+      console.warn("Local Reader: cached job no longer usable, resynthesizing", err);
+      return null;
+    }
   }
 
   // Fire-and-forget: tell the server to stop a job we no longer care about.
@@ -171,6 +217,41 @@
     return null;
   }
 
+  // Remembers the synthesis job for whatever chapter this page is currently
+  // on, so reloading the same chapter can reuse it instead of resynthesizing
+  // from scratch -- as long as the server process is still the same one and
+  // hasn't pruned or cancelled it (see tryReuseJob).
+  function saveCurrentJob(path, settings, jobId) {
+    GM_setValue("lr_current_job", { path, jobId, voice: settings.voice, speed: settings.speed, engine: settings.engine });
+  }
+
+  function getMatchingCurrentJob(path, settings) {
+    const j = GM_getValue("lr_current_job", null);
+    if (j && j.path === path && j.voice === settings.voice && j.speed === settings.speed && j.engine === settings.engine) {
+      return j.jobId;
+    }
+    return null;
+  }
+
+  // Where playback was left off in whatever chapter was last playing --
+  // a single slot, not a per-chapter history, so it only ever helps you
+  // resume the one you most recently paused/left.
+  function savePosition(path, settings, time) {
+    GM_setValue("lr_position", { path, voice: settings.voice, speed: settings.speed, time });
+  }
+
+  function getMatchingPosition(path, settings) {
+    const p = GM_getValue("lr_position", null);
+    if (p && p.path === path && p.voice === settings.voice && p.speed === settings.speed) {
+      return p.time;
+    }
+    return 0;
+  }
+
+  function clearPosition() {
+    GM_setValue("lr_position", null);
+  }
+
   async function schedulePreloadNextChapter(settings) {
     if (!settings.preloadNext) return;
     const nextPath = adjacentChapterHref(1);
@@ -179,7 +260,7 @@
     if (!m) return;
     try {
       const text = await fetchChapterText(m[1], m[2]);
-      const { job_id } = await startSynthesisJob(text, settings);
+      const { job_id } = await startSynthesisJob(text, settings, true);
       GM_setValue("lr_preload", { path: nextPath, jobId: job_id, voice: settings.voice, speed: settings.speed, engine: settings.engine });
     } catch (err) {
       console.warn("Local Reader: preload failed", err);
@@ -218,6 +299,8 @@
     }
   }
 
+  let lastPositionSave = 0;
+
   function updateSeekUI() {
     if (!currentAudio || seeking) return;
     const dur = currentAudio.duration || 0;
@@ -227,6 +310,12 @@
     el("lr-fill").style.width = pct + "%";
     if (state === "playing") setStatus(`Reading · ${fmtTime(currentAudio.currentTime)} / ${fmtTime(dur)}`);
     else if (state === "paused") setStatus(`Paused · ${fmtTime(currentAudio.currentTime)} / ${fmtTime(dur)}`);
+
+    const now = Date.now();
+    if (now - lastPositionSave > 3000) {
+      lastPositionSave = now;
+      savePosition(location.pathname, getSettings(), currentAudio.currentTime);
+    }
   }
 
   function attachAudioHandlers(audio, settings) {
@@ -246,6 +335,7 @@
       state = "idle";
       updatePlayButton();
       setStatus("Finished");
+      clearPosition();
       if (settings.autoAdvance) {
         const next = adjacentChapterHref(1);
         if (next) goToChapter(next);
@@ -264,23 +354,38 @@
     updatePlayButton();
     const settings = getSettings();
     try {
+      let blob = null;
+
       const preload = getMatchingPreload(location.pathname, settings);
-      let blob;
       if (preload) {
         GM_setValue("lr_preload", null);
         currentJobId = preload.jobId;
         setStatus("Finishing preload...");
-        blob = await waitForJobAudio(preload.jobId, setProgress);
+        blob = await tryReuseJob(preload.jobId, setProgress);
         currentJobId = null;
-      } else {
+      }
+
+      if (!blob) {
+        const cachedJobId = getMatchingCurrentJob(location.pathname, settings);
+        if (cachedJobId) {
+          currentJobId = cachedJobId;
+          setStatus("Resuming...");
+          blob = await tryReuseJob(cachedJobId, setProgress);
+          currentJobId = null;
+        }
+      }
+
+      if (!blob) {
         setStatus("Fetching chapter...");
         const text = await fetchChapterText(here.slug, here.number);
         setStatus("Synthesizing... 0%");
-        blob = await synthesize(text, settings, setProgress);
+        blob = await synthesize(text, settings, setProgress, location.pathname);
       }
 
       currentAudioUrl = URL.createObjectURL(blob);
       currentAudio = new Audio(currentAudioUrl);
+      const resumeAt = getMatchingPosition(location.pathname, settings);
+      if (resumeAt > 0) currentAudio.currentTime = resumeAt;
       attachAudioHandlers(currentAudio, settings);
       currentAudio.play();
       schedulePreloadNextChapter(settings);
@@ -338,6 +443,9 @@
       URL.revokeObjectURL(currentAudioUrl);
       currentAudioUrl = null;
     }
+    // Speed changes the audio's own timeline, so a saved position in seconds
+    // no longer points at the same spot in the chapter.
+    clearPosition();
     state = "idle";
     updatePlayButton();
     setStatus("Ready");
@@ -482,7 +590,12 @@
 
   function voiceOptionsHtml() {
     const current = getSettings().voice;
-    return VOICES.map((v) => `<option value="${v.id}" ${v.id === current ? "selected" : ""}>${v.label}</option>`).join("");
+    return VOICE_GROUPS.map(
+      (g) =>
+        `<optgroup label="${g.label}">` +
+        g.voices.map((v) => `<option value="${v.id}" ${v.id === current ? "selected" : ""}>${v.label}</option>`).join("") +
+        `</optgroup>`
+    ).join("");
   }
 
   function speedOptionsHtml() {

@@ -49,6 +49,13 @@ CHUNK_MAX_CHARS = 300
 CHUNK_WORKERS = min(3, os.cpu_count() or 1)
 _executor = ThreadPoolExecutor(max_workers=CHUNK_WORKERS, thread_name_prefix="tts-chunk")
 
+# Preloading the next chapter happens quietly while the reader is still busy
+# with the current one, so it doesn't need to be fast. One worker instead of
+# three keeps it from pegging multiple cores (and spinning up fans) just to
+# get a head start -- it'll simply take a few minutes longer than the
+# foreground synthesis above, which still gets the full worker pool.
+_background_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-preload")
+
 
 def load_config() -> dict:
     default = {"voice": "am_michael", "speed": 1.0}
@@ -95,12 +102,22 @@ def _run_job(job_id: str, futures: list, tmp_dir: str):
     sample_rate = None
     done_lock = threading.Lock()
     try:
+        # Always drain every future to a terminal state before falling through
+        # to the tmp_dir cleanup in `finally`, even once cancelled. A future
+        # that was already running when /speak/cancel arrived can't actually
+        # be stopped -- it keeps writing its chunk's .wav file into tmp_dir in
+        # the background regardless. Breaking out early and deleting that
+        # directory out from under it can wedge the worker thread, and with
+        # only 3 of them total, that's enough to jam the whole pool until the
+        # process is restarted. Cancellation is still reported to the client
+        # instantly via the flag itself -- this only affects when *this*
+        # background thread tidies up, not how fast the API responds.
         for future in as_completed(futures):
-            if job["cancelled"]:
-                break
             try:
                 index, samples, sr = future.result()
             except CancelledError:
+                continue
+            if job["cancelled"]:
                 continue
             results[index] = samples
             sample_rate = sr
@@ -157,17 +174,19 @@ def speak_start():
 
     voice = data.get("voice", cfg["voice"])
     speed = float(data.get("speed", cfg["speed"]))
+    background = bool(data.get("background", False))
 
     chunks = chunk_text(text)
     job_id = uuid.uuid4().hex
     tmp_dir = tempfile.mkdtemp(prefix=f"tts-{job_id}-")
+    executor = _background_executor if background else _executor
 
     # Submit every chunk to the pool right here, synchronously, before this
     # request even returns. That way job["futures"] is fully populated the
     # instant the client learns the job_id -- no window where a /speak/cancel
     # that arrives quickly could find an empty list and cancel nothing.
     futures = [
-        _executor.submit(_synthesize_one_chunk, kokoro_engine, voice, speed, chunk, tmp_dir, i)
+        executor.submit(_synthesize_one_chunk, kokoro_engine, voice, speed, chunk, tmp_dir, i)
         for i, chunk in enumerate(chunks)
     ]
 
@@ -217,6 +236,72 @@ def speak_audio(job_id):
     return Response(job["audio"], mimetype="audio/wav")
 
 
+def _make_tray_image():
+    from PIL import Image, ImageDraw
+
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((2, 2, size - 2, size - 2), fill=(255, 0, 79, 255))
+    draw.polygon([(23, 17), (23, 47), (48, 32)], fill=(255, 255, 255, 255))
+    return img
+
+
+def _run_with_tray_icon():
+    import pystray
+    from pystray import MenuItem
+
+    def close_server(icon, _item):
+        icon.stop()
+        os._exit(0)
+
+    menu = pystray.Menu(
+        MenuItem("Chikari Local Reader - running", None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        MenuItem("Close Server", close_server),
+    )
+    icon = pystray.Icon("chikari-local-reader", _make_tray_image(), "Chikari Local Reader", menu)
+    icon.run()
+
+
 if __name__ == "__main__":
-    print("Local TTS server on http://127.0.0.1:8791 (Ctrl+C to stop)")
-    app.run(host="127.0.0.1", port=8791, threaded=True)
+    # pythonw.exe (used so no console window ever appears) sets stdout/stderr
+    # to None, which makes any print() -- ours or Flask/Werkzeug's own startup
+    # messages -- crash immediately. Redirect to a log file instead whenever
+    # there's no real console to write to.
+    if sys.stdout is None:
+        log_file = open(ROOT / "server.log", "a", buffering=1)
+        sys.stdout = sys.stderr = log_file
+
+    print("Local TTS server on http://127.0.0.1:8791")
+
+    threading.Thread(
+        target=lambda: app.run(host="127.0.0.1", port=8791, threaded=True, use_reloader=False),
+        daemon=True,
+    ).start()
+
+    # Kokoro only builds its onnxruntime session on first use, which takes
+    # 15-20s -- during which the very first chunk of the very first chapter
+    # has nothing to show, indistinguishable from being stuck at 0%. Load it
+    # now instead, in the background, so that tax is paid at startup (while
+    # you're still finding the extension and opening a chapter) rather than
+    # the moment you press Play.
+    def _warm_up_model():
+        try:
+            kokoro_engine._get_kokoro()
+            print("Voice model loaded and ready.")
+        except Exception as e:  # noqa: BLE001
+            print(f"Voice model warm-up failed (will load on first request instead): {e}")
+
+    threading.Thread(target=_warm_up_model, daemon=True).start()
+
+    try:
+        _run_with_tray_icon()
+    except Exception as e:  # noqa: BLE001
+        # pystray/Pillow missing, no attached desktop session, or any other
+        # environment issue -- fall back to a plain console loop rather than
+        # taking the whole server down over a tray icon failing to appear.
+        print(f"(Tray icon unavailable ({e}) -- running without one.)")
+        print("Ctrl+C to stop.")
+        while True:
+            time.sleep(3600)

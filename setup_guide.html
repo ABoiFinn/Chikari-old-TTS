@@ -354,7 +354,7 @@
         <div class="step-num">3</div>
         <div>
           <h3>Start the server</h3>
-          <p>Double-click <span class="chip">Start Server.bat</span>. Keep the window open while you're reading.</p>
+          <p>Double-click <span class="chip">Start Server.bat</span>. No window opens &mdash; look for its icon in the system tray instead. Right-click it and choose <strong>Close Server</strong> when you're done reading.</p>
         </div>
       </div>
 
@@ -372,7 +372,7 @@
     <div class="section-head"><h2>Every time after that</h2></div>
     <p class="section-sub">Setup is one-time. From now on, reading just takes two steps:</p>
     <ul class="checklist">
-      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M6 4v16l14-8L6 4Z" fill="currentColor"/></svg><span>Double-click <span class="chip">Start Server.bat</span> and leave its window open.</span></li>
+      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M6 4v16l14-8L6 4Z" fill="currentColor"/></svg><span>Double-click <span class="chip">Start Server.bat</span> (it runs quietly in the system tray).</span></li>
       <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M6 4v16l14-8L6 4Z" fill="currentColor"/></svg><span>Open a chapter on chikari.moe and press <strong>Play</strong> in the panel.</span></li>
     </ul>
   </section>
@@ -386,8 +386,12 @@
     <div class="section-head"><h2>If something's not working</h2></div>
     <div class="trouble">
       <div class="trouble-item">
+        <div class="symptom">Avoid refreshing or closing the page while synthesis is running</div>
+        <p>Chunks already in progress can't be stopped mid-flight, only queued ones. Refresh anyway and the next attempt may sit at 0% for up to a minute while those leftover chunks finish in the background &mdash; it'll recover on its own, just wait it out rather than restarting the server.</p>
+      </div>
+      <div class="trouble-item">
         <div class="symptom">Panel missing, or status says the server is unreachable</div>
-        <p>Make sure <span class="chip">Start Server.bat</span> is running and its window shows the "listening" line. If the panel itself is missing, refresh the page and check the extension is switched on at <span class="chip">chrome://extensions</span>.</p>
+        <p>Check the system tray for the Local Reader icon &mdash; if it's not there, double-click <span class="chip">Start Server.bat</span> again. If the panel itself is missing, refresh the page and check the extension is switched on at <span class="chip">chrome://extensions</span>.</p>
       </div>
       <div class="trouble-item">
         <div class="symptom">Windows warns about Install.bat or Start Server.bat</div>
